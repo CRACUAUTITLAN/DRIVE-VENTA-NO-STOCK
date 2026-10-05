@@ -79,10 +79,17 @@ def buscar_archivos_ventas(drive_service, master_sales_id, agencia, anios):
 def cargar_inventario_filtrado(_drive_service, inventory_folder_id):
     if not inventory_folder_id: return pd.DataFrame()
     try:
-        query = f"name contains 'CRA_REFACCIONES' and '{inventory_folder_id}' in parents and trashed=false"
+        # 1. Buscamos el archivo correcto (INVENTARIO_CRA)
+        query = f"name contains 'INVENTARIO_CRA' and '{inventory_folder_id}' in parents and trashed=false"
         results = _drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         files = results.get('files', [])
         
+        # Si no lo encuentra, busca CRA_REFACCIONES como plan B
+        if not files:
+            query2 = f"name contains 'CRA_REFACCIONES' and '{inventory_folder_id}' in parents and trashed=false"
+            results2 = _drive_service.files().list(q=query2, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+            files = results2.get('files', [])
+            
         if not files: return pd.DataFrame()
             
         content = descargar_archivo_drive(_drive_service, files[0]['id'])
@@ -91,15 +98,24 @@ def cargar_inventario_filtrado(_drive_service, inventory_folder_id):
             df_inv = pd.read_excel(content, engine=engine)
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
+            # 2. LIMPIEZA EXTREMA: Asegurar que el NP sea texto limpio para el cruce
+            if 'NP' in df_inv.columns:
+                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            
+            # 3. FORZAR MATEMÁTICAS: Convertir texto a números y rellenar vacíos con 0
+            if 'EXISTENCIA' in df_inv.columns:
+                df_inv['EXISTENCIA'] = pd.to_numeric(df_inv['EXISTENCIA'], errors='coerce').fillna(0)
+            if 'COSTO_UNITARIO' in df_inv.columns:
+                df_inv['COSTO_UNITARIO'] = pd.to_numeric(df_inv['COSTO_UNITARIO'], errors='coerce').fillna(0)
+            
             # FILTRO ESTRICTO: Solo Cuautitlan / Alm. General
             mask_filtro = (df_inv['SUCURSAL'].astype(str).str.strip().str.upper() == 'CUAUTITLAN') & \
                           (df_inv['ALMACEN'].astype(str).str.strip().str.upper() == 'ALM. GENERAL')
             df_inv_filtrado = df_inv[mask_filtro].copy()
             
-            df_inv_filtrado['NP'] = df_inv_filtrado['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
             return df_inv_filtrado
     except Exception as e:
-        print(f"Error cargando CRA_REFACCIONES: {e}")
+        print(f"Error cargando inventario: {e}")
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
