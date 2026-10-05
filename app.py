@@ -238,11 +238,12 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         MASTER_SALES_ID = st.secrets["general"].get("master_sales_id")
         INVENTORY_FOLDER_ID = st.secrets["general"].get("inventory_folder_id")
         
-        # Extracción Forzada con Llave Maestra
+# Extracción Forzada con Llave Maestra
         try:
             res = requests.get(URL_DRIVE, headers=headers_robot)
             if res.status_code == 200:
-                df_drive = pd.read_csv(io.StringIO(res.text))
+                # header=1 le dice a Pandas que los títulos están en la segunda fila
+                df_drive = pd.read_csv(io.StringIO(res.text), header=1) 
             else:
                 st.error(f"Error de acceso. Código HTTP: {res.status_code}")
                 st.stop()
