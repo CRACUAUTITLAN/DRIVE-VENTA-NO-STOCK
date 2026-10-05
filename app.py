@@ -254,11 +254,10 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         MASTER_SALES_ID = st.secrets["general"].get("master_sales_id")
         INVENTORY_FOLDER_ID = st.secrets["general"].get("inventory_folder_id")
         
-# Extracción Forzada con Llave Maestra
+        # Extracción Forzada con Llave Maestra (Header=1 para leer desde fila 2)
         try:
             res = requests.get(URL_DRIVE, headers=headers_robot)
             if res.status_code == 200:
-                # header=1 le dice a Pandas que los títulos están en la segunda fila
                 df_drive = pd.read_csv(io.StringIO(res.text), header=1) 
             else:
                 st.error(f"Error de acceso. Código HTTP: {res.status_code}")
@@ -279,6 +278,7 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             
         st.markdown("---")
         
+        # --- KPIs GLOBALES SUPERIORES ---
         total_pedido = base_final['CANT_SOLICITADA'].sum()
         total_facturado = base_final['CANT_FACTURADA'].sum()
         capital_atorado = base_final[base_final['ALERTA'].str.contains("ESTANCADO")]['CAPITAL_INMOVILIZADO'].sum()
@@ -288,6 +288,7 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         col2.metric("🧾 Total Piezas Facturadas", f"{total_facturado:,.0f}")
         col3.metric("💸 Capital Estancado (Riesgo Rojo)", f"${capital_atorado:,.2f}")
         
+        # --- TABLA PRINCIPAL (DEMANDA AL FINAL Y FORMATO DE PESOS) ---
         st.subheader("📋 Detalle de Solicitudes y Estatus")
         columnas_vista = [
             'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'DEMANDA', 'FECHA_SOLICITUD', 
@@ -295,11 +296,59 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             'EXISTENCIA', 'CAPITAL_INMOVILIZADO', 'ALERTA'
         ]
         cols_finales = [c for c in columnas_vista if c in base_final.columns]
-        st.dataframe(base_final[cols_finales], use_container_width=True, hide_index=True)
         
-        st.subheader("📉 Muro de la Vergüenza: Vendedores con Capital Detenido")
-        if not base_final[base_final['ALERTA'].str.contains("ESTANCADO")].empty:
-            agrupado_vendedores = base_final[base_final['ALERTA'].str.contains("ESTANCADO")].groupby('VENDEDOR')['CAPITAL_INMOVILIZADO'].sum().sort_values(ascending=False).reset_index()
-            st.dataframe(agrupado_vendedores.style.format({'CAPITAL_INMOVILIZADO': '${:,.2f}'}), use_container_width=True, hide_index=True)
-        else:
-            st.success("¡Excelente! No hay capital inmovilizado en las solicitudes antiguas.")
+        # Inyectar el formato de moneda exclusivamente a la columna CAPITAL_INMOVILIZADO
+        st.dataframe(
+            base_final[cols_finales].style.format({
+                'CAPITAL_INMOVILIZADO': '${:,.2f}'
+            }), 
+            use_container_width=True, 
+            hide_index=True
+        )
+        
+        # --- NUEVOS INDICADORES DE DESEMPEÑO Y CALIDAD ---
+        colA, colB = st.columns(2)
+        
+        with colA:
+            st.subheader("🎯 Desempeño de Venta por Asesor")
+            desempeno = base_final.groupby('VENDEDOR').agg(
+                PIEZAS_SOLICITADAS=('CANT_SOLICITADA', 'sum'),
+                PIEZAS_FACTURADAS=('CANT_FACTURADA', 'sum')
+            ).reset_index()
+            
+            # Cálculo de la tasa de éxito (Manejo de división por cero)
+            desempeno['TASA DE ÉXITO'] = np.where(
+                desempeno['PIEZAS_SOLICITADAS'] > 0,
+                desempeno['PIEZAS_FACTURADAS'] / desempeno['PIEZAS_SOLICITADAS'],
+                0
+            )
+            
+            # Ordenar de mejor a peor vendedor
+            desempeno = desempeno.sort_values(by='TASA DE ÉXITO', ascending=False)
+            
+            # Formatear la vista
+            st.dataframe(
+                desempeno.style.format({
+                    'PIEZAS_SOLICITADAS': '{:,.0f}', 
+                    'PIEZAS_FACTURADAS': '{:,.0f}',
+                    'TASA DE ÉXITO': '{:.1%}'
+                }), 
+                use_container_width=True, 
+                hide_index=True
+            )
+            
+        with colB:
+            st.subheader("📊 Calidad del Pedido (Clasificación de Demanda)")
+            calidad = base_final.groupby('DEMANDA').agg(
+                TOTAL_PIEZAS_SOLICITADAS=('CANT_SOLICITADA', 'sum')
+            ).reset_index()
+            
+            calidad = calidad.sort_values(by='TOTAL_PIEZAS_SOLICITADAS', ascending=False)
+            
+            # Gráfico visual rápido + Tabla de desglose
+            st.bar_chart(calidad.set_index('DEMANDA'), color="#ff4b4b")
+            st.dataframe(
+                calidad.style.format({'TOTAL_PIEZAS_SOLICITADAS': '{:,.0f}'}), 
+                use_container_width=True, 
+                hide_index=True
+            )
