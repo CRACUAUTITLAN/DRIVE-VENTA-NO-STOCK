@@ -15,6 +15,54 @@ import google.auth.transport.requests
 # CONFIGURACIÓN DE PÁGINA
 # ==========================================
 st.set_page_config(page_title="Auditoría de Pedidos vs Ventas", layout="wide", page_icon="⚖️")
+
+# ==========================================
+# 🔐 SISTEMA DE PROTECCIÓN (LOGIN)
+# ==========================================
+if 'authenticated' not in st.session_state:
+    st.session_state['authenticated'] = False
+
+# Credenciales de acceso
+CREDENTIALS = {
+    "CRA REFACCIONES": "REFACCIONES2026."
+}
+
+def check_login(user, password):
+    if CREDENTIALS.get(user) == password:
+        st.session_state['authenticated'] = True
+        st.rerun()
+    else:
+        st.error("🚫 Contraseña incorrecta")
+
+if not st.session_state['authenticated']:
+    st.title("🔒 Acceso Restringido")
+    st.markdown("### Por favor identifícate para continuar")
+    
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        selected_user = st.selectbox("Selecciona Usuario:", list(CREDENTIALS.keys()))
+    with col2:
+        input_pass = st.text_input("Contraseña:", type="password")
+        
+    if st.button("Ingresar al Sistema"):
+        check_login(selected_user, input_pass)
+        
+    st.info("Si necesitas acceso, contacta al administrador.")
+    st.stop()
+
+# ==========================================
+# 1. AUTENTICACIÓN DEL ROBOT EN LA NUBE (INICIO DEL DASHBOARD)
+# ==========================================
+st.title("⚖️ Auditoría: Solicitudes de Compra vs. Facturación Real")
+st.markdown("Monitor de sobre-pedidos, capital inmovilizado y efectividad por vendedor (Ignorando solicitudes de los últimos 5 días para dar margen de venta).")
+
+@st.cache_resource
+def get_drive_service():
+# ... [El resto de tu código continúa exactamente igual a partir de aquí] ...
+# ==========================================
+# CONFIGURACIÓN DE PÁGINA
+# ==========================================
+st.set_page_config(page_title="Auditoría de Pedidos vs Ventas", layout="wide", page_icon="⚖️")
 st.title("⚖️ Auditoría: Solicitudes de Compra vs. Facturación Real")
 st.markdown("Monitor de sobre-pedidos, capital inmovilizado y efectividad por vendedor (Ignorando solicitudes de los últimos 5 días para dar margen de venta).")
 
@@ -288,7 +336,7 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         col2.metric("🧾 Total Piezas Facturadas", f"{total_facturado:,.0f}")
         col3.metric("💸 Capital Estancado (Riesgo Rojo)", f"${capital_atorado:,.2f}")
         
-        # --- TABLA PRINCIPAL (DEMANDA AL FINAL Y FORMATO DE PESOS) ---
+        # --- TABLA PRINCIPAL (FORMATO DE CANTIDADES Y PESOS) ---
         st.subheader("📋 Detalle de Solicitudes y Estatus")
         columnas_vista = [
             'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'DEMANDA', 'FECHA_SOLICITUD', 
@@ -297,9 +345,13 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         ]
         cols_finales = [c for c in columnas_vista if c in base_final.columns]
         
-        # Inyectar el formato de moneda exclusivamente a la columna CAPITAL_INMOVILIZADO
+        # Inyectar formato de enteros a las cantidades y formato de moneda al capital
         st.dataframe(
             base_final[cols_finales].style.format({
+                'CANT_SOLICITADA': '{:,.0f}',
+                'CANT_FACTURADA': '{:,.0f}',
+                'PIEZAS_NO_FACTURADAS': '{:,.0f}',
+                'EXISTENCIA': '{:,.0f}',
                 'CAPITAL_INMOVILIZADO': '${:,.2f}'
             }), 
             use_container_width=True, 
