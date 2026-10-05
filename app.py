@@ -9,6 +9,7 @@ from dateutil.relativedelta import relativedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+import google.auth.transport.requests
 
 # ==========================================
 # CONFIGURACIÓN DE PÁGINA
@@ -22,7 +23,7 @@ st.markdown("Monitor de sobre-pedidos, capital inmovilizado y efectividad por ve
 # ==========================================
 @st.cache_resource
 def get_drive_service():
-    """Genera la llave maestra del Robot para leer Hojas de Google y Drive"""
+    """Genera la llave maestra del Robot para leer Archivos Pesados de Google Drive"""
     try:
         gcp_creds = dict(st.secrets["gcp_service_account"])
         creds = service_account.Credentials.from_service_account_info(
@@ -30,7 +31,22 @@ def get_drive_service():
         )
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
-        st.error(f"⚠️ Error al conectar el Robot: Verifica tus secrets.toml. Detalle: {e}")
+        st.error(f"⚠️ Error al conectar el Robot API: Verifica tus secrets.toml. Detalle: {e}")
+        st.stop()
+
+@st.cache_resource
+def get_auth_headers():
+    """Obtiene el token de seguridad del Robot para descargar Links Restringidos"""
+    try:
+        gcp_creds = dict(st.secrets["gcp_service_account"])
+        creds = service_account.Credentials.from_service_account_info(
+            gcp_creds, scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        auth_req = google.auth.transport.requests.Request()
+        creds.refresh(auth_req)
+        return {"Authorization": f"Bearer {creds.token}"}
+    except Exception as e:
+        st.error(f"⚠️ Error al generar Headers del Robot: {e}")
         st.stop()
 
 # ==========================================
@@ -164,15 +180,12 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
     df_sol['NP'] = df_sol['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     df_sol['FECHA_SOLICITUD'] = pd.to_datetime(df_sol['FECHA_SOLICITUD'], dayfirst=True, errors='coerce')
     
-    # ---------------------------------------------------------------------
-    # REGLA DE 5 DÍAS DE ANTIGÜEDAD (MARGEN DE VENTA)
-    # Se descartan todas las solicitudes que tengan menos de 5 días de haber sido pedidas.
-    # ---------------------------------------------------------------------
+    # REGLA DE 5 DÍAS DE ANTIGÜEDAD
     fecha_limite = pd.Timestamp.now().normalize() - pd.Timedelta(days=5)
     df_sol = df_sol[df_sol['FECHA_SOLICITUD'] <= fecha_limite].copy()
     
     if df_sol.empty:
-        return df_sol # Retorna vacío si todo fue pedido muy recientemente
+        return df_sol 
     
     # CRUCE 1: SOLICITUD VS VENTAS REALES
     cruce_ventas = pd.merge(df_sol, df_ven[['VENDEDOR', 'NP', 'FECHA_VENTA', 'CANT_VENDIDA']], 
@@ -220,13 +233,21 @@ URL_DRIVE = "https://docs.google.com/spreadsheets/d/1n03PpyyqR60ZTjlXvIwHH73Bfmk
 if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
     with st.spinner("🤖 Robot extrayendo archivos (esto tomará un minuto, optimizando memoria)..."):
         drive_service = get_drive_service()
+        headers_robot = get_auth_headers()
+        
         MASTER_SALES_ID = st.secrets["general"].get("master_sales_id")
         INVENTORY_FOLDER_ID = st.secrets["general"].get("inventory_folder_id")
         
+        # Extracción Forzada con Llave Maestra
         try:
-            df_drive = pd.read_csv(URL_DRIVE)
+            res = requests.get(URL_DRIVE, headers=headers_robot)
+            if res.status_code == 200:
+                df_drive = pd.read_csv(io.StringIO(res.text))
+            else:
+                st.error(f"Error de acceso. Código HTTP: {res.status_code}")
+                st.stop()
         except Exception as e:
-            st.error("Error leyendo el Google Sheet de Solicitudes. Verifica permisos de acceso.")
+            st.error(f"Error crítico al leer el Google Sheet restringido: {e}")
             st.stop()
             
         df_ventas = descargar_ventas_optimizadas(drive_service, MASTER_SALES_ID)
