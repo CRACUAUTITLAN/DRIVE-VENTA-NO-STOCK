@@ -22,7 +22,6 @@ st.set_page_config(page_title="Auditoría de Pedidos vs Ventas", layout="wide", 
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
-# Credenciales de acceso
 CREDENTIALS = {
     "CRA REFACCIONES": "REFACCIONES2026."
 }
@@ -51,18 +50,8 @@ if not st.session_state['authenticated']:
     st.stop()
 
 # ==========================================
-# 1. AUTENTICACIÓN DEL ROBOT EN LA NUBE (INICIO DEL DASHBOARD)
+# INICIO DEL DASHBOARD
 # ==========================================
-st.title("⚖️ Auditoría: Solicitudes de Compra vs. Facturación Real")
-st.markdown("Monitor de sobre-pedidos, capital inmovilizado y efectividad por vendedor (Ignorando solicitudes de los últimos 5 días para dar margen de venta).")
-
-@st.cache_resource
-def get_drive_service():
-# ... [El resto de tu código continúa exactamente igual a partir de aquí] ...
-# ==========================================
-# CONFIGURACIÓN DE PÁGINA
-# ==========================================
-st.set_page_config(page_title="Auditoría de Pedidos vs Ventas", layout="wide", page_icon="⚖️")
 st.title("⚖️ Auditoría: Solicitudes de Compra vs. Facturación Real")
 st.markdown("Monitor de sobre-pedidos, capital inmovilizado y efectividad por vendedor (Ignorando solicitudes de los últimos 5 días para dar margen de venta).")
 
@@ -71,7 +60,6 @@ st.markdown("Monitor de sobre-pedidos, capital inmovilizado y efectividad por ve
 # ==========================================
 @st.cache_resource
 def get_drive_service():
-    """Genera la llave maestra del Robot para leer Archivos Pesados de Google Drive"""
     try:
         gcp_creds = dict(st.secrets["gcp_service_account"])
         creds = service_account.Credentials.from_service_account_info(
@@ -84,7 +72,6 @@ def get_drive_service():
 
 @st.cache_resource
 def get_auth_headers():
-    """Obtiene el token de seguridad del Robot para descargar Links Restringidos"""
     try:
         gcp_creds = dict(st.secrets["gcp_service_account"])
         creds = service_account.Credentials.from_service_account_info(
@@ -127,12 +114,10 @@ def buscar_archivos_ventas(drive_service, master_sales_id, agencia, anios):
 def cargar_inventario_filtrado(_drive_service, inventory_folder_id):
     if not inventory_folder_id: return pd.DataFrame()
     try:
-        # 1. Buscamos el archivo correcto (INVENTARIO_CRA)
         query = f"name contains 'INVENTARIO_CRA' and '{inventory_folder_id}' in parents and trashed=false"
         results = _drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         files = results.get('files', [])
         
-        # Si no lo encuentra, busca CRA_REFACCIONES como plan B
         if not files:
             query2 = f"name contains 'CRA_REFACCIONES' and '{inventory_folder_id}' in parents and trashed=false"
             results2 = _drive_service.files().list(q=query2, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
@@ -146,22 +131,16 @@ def cargar_inventario_filtrado(_drive_service, inventory_folder_id):
             df_inv = pd.read_excel(content, engine=engine)
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
-            # 2. LIMPIEZA EXTREMA: Asegurar que el NP sea texto limpio para el cruce
             if 'NP' in df_inv.columns:
                 df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-            
-            # 3. FORZAR MATEMÁTICAS: Convertir texto a números y rellenar vacíos con 0
             if 'EXISTENCIA' in df_inv.columns:
                 df_inv['EXISTENCIA'] = pd.to_numeric(df_inv['EXISTENCIA'], errors='coerce').fillna(0)
             if 'COSTO_UNITARIO' in df_inv.columns:
                 df_inv['COSTO_UNITARIO'] = pd.to_numeric(df_inv['COSTO_UNITARIO'], errors='coerce').fillna(0)
             
-            # FILTRO ESTRICTO: Solo Cuautitlan / Alm. General
             mask_filtro = (df_inv['SUCURSAL'].astype(str).str.strip().str.upper() == 'CUAUTITLAN') & \
                           (df_inv['ALMACEN'].astype(str).str.strip().str.upper() == 'ALM. GENERAL')
-            df_inv_filtrado = df_inv[mask_filtro].copy()
-            
-            return df_inv_filtrado
+            return df_inv[mask_filtro].copy()
     except Exception as e:
         print(f"Error cargando inventario: {e}")
     return pd.DataFrame()
@@ -210,8 +189,7 @@ def descargar_ventas_optimizadas(_drive_service, master_sales_id):
                 df_temp = pd.read_excel(content, engine=engine)
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
                 cols_utiles = [c for c in df_temp.columns if c in ['NP', 'VENDEDOR', 'FECHA', 'CANTIDAD', 'FACTURA']]
-                df_filtrado = df_temp[cols_utiles].copy()
-                dfs.append(df_filtrado)
+                dfs.append(df_temp[cols_utiles].copy())
                 del df_temp 
             except Exception: pass
             finally:
@@ -302,7 +280,6 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         MASTER_SALES_ID = st.secrets["general"].get("master_sales_id")
         INVENTORY_FOLDER_ID = st.secrets["general"].get("inventory_folder_id")
         
-        # Extracción Forzada con Llave Maestra (Header=1 para leer desde fila 2)
         try:
             res = requests.get(URL_DRIVE, headers=headers_robot)
             if res.status_code == 200:
@@ -326,7 +303,6 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             
         st.markdown("---")
         
-        # --- KPIs GLOBALES SUPERIORES ---
         total_pedido = base_final['CANT_SOLICITADA'].sum()
         total_facturado = base_final['CANT_FACTURADA'].sum()
         capital_atorado = base_final[base_final['ALERTA'].str.contains("ESTANCADO")]['CAPITAL_INMOVILIZADO'].sum()
@@ -336,16 +312,15 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         col2.metric("🧾 Total Piezas Facturadas", f"{total_facturado:,.0f}")
         col3.metric("💸 Capital Estancado (Riesgo Rojo)", f"${capital_atorado:,.2f}")
         
-        # --- TABLA PRINCIPAL (FORMATO DE CANTIDADES Y PESOS) ---
+        # --- TABLA PRINCIPAL (SIN DECIMALES EN CANTIDADES) ---
         st.subheader("📋 Detalle de Solicitudes y Estatus")
         columnas_vista = [
-            'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'DEMANDA', 'FECHA_SOLICITUD', 
+            'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'FECHA_SOLICITUD', 
             'CANT_SOLICITADA', 'CANT_FACTURADA', 'PIEZAS_NO_FACTURADAS', 
-            'EXISTENCIA', 'CAPITAL_INMOVILIZADO', 'ALERTA'
+            'EXISTENCIA', 'CAPITAL_INMOVILIZADO', 'ALERTA', 'DEMANDA'
         ]
         cols_finales = [c for c in columnas_vista if c in base_final.columns]
         
-        # Inyectar formato de enteros a las cantidades y formato de moneda al capital
         st.dataframe(
             base_final[cols_finales].style.format({
                 'CANT_SOLICITADA': '{:,.0f}',
@@ -358,7 +333,9 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             hide_index=True
         )
         
-        # --- NUEVOS INDICADORES DE DESEMPEÑO Y CALIDAD ---
+        st.markdown("---")
+        
+        # --- INDICADORES DE DESEMPEÑO Y CALIDAD ---
         colA, colB = st.columns(2)
         
         with colA:
@@ -368,17 +345,13 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
                 PIEZAS_FACTURADAS=('CANT_FACTURADA', 'sum')
             ).reset_index()
             
-            # Cálculo de la tasa de éxito (Manejo de división por cero)
             desempeno['TASA DE ÉXITO'] = np.where(
                 desempeno['PIEZAS_SOLICITADAS'] > 0,
                 desempeno['PIEZAS_FACTURADAS'] / desempeno['PIEZAS_SOLICITADAS'],
                 0
             )
-            
-            # Ordenar de mejor a peor vendedor
             desempeno = desempeno.sort_values(by='TASA DE ÉXITO', ascending=False)
             
-            # Formatear la vista
             st.dataframe(
                 desempeno.style.format({
                     'PIEZAS_SOLICITADAS': '{:,.0f}', 
@@ -397,7 +370,6 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             
             calidad = calidad.sort_values(by='TOTAL_PIEZAS_SOLICITADAS', ascending=False)
             
-            # Gráfico visual rápido + Tabla de desglose
             st.bar_chart(calidad.set_index('DEMANDA'), color="#ff4b4b")
             st.dataframe(
                 calidad.style.format({'TOTAL_PIEZAS_SOLICITADAS': '{:,.0f}'}), 
