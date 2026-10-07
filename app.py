@@ -1,3 +1,25 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import io
+import datetime
+import gc
+import requests
+from dateutil.relativedelta import relativedelta
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import google.auth.transport.requests
+
+# ==========================================
+# CONFIGURACIÓN DE PÁGINA
+# ==========================================
+st.set_page_config(page_title="Auditoría de Pedidos vs Ventas", layout="wide", page_icon="⚖️")
+
+# ==========================================
+# 🔐 SISTEMA DE PROTECCIÓN (LOGIN)
+# ==========================================
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_demanda_cuautitlan(_drive_service):
     # ID de la carpeta exacta que proporcionaste
