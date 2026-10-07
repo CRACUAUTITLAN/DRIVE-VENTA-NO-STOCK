@@ -146,8 +146,9 @@ def cargar_inventario_filtrado(_drive_service, inventory_folder_id):
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def cargar_demanda_cuautitlan(_drive_service, folder_id):
-    if not folder_id: return pd.DataFrame()
+def cargar_demanda_cuautitlan(_drive_service):
+    # ID de la carpeta exacta que proporcionaste
+    folder_id = "1rjtSHBSrHWeBj771lAUJwN4uGGHhdHwo"
     try:
         query = f"name contains 'DEMANDA_CUAUTITLAN' and '{folder_id}' in parents and trashed=false"
         results = _drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
@@ -161,9 +162,11 @@ def cargar_demanda_cuautitlan(_drive_service, folder_id):
             df_demanda = pd.read_excel(content, engine=engine)
             df_demanda.columns = df_demanda.columns.str.upper().str.strip()
             
-            if 'NP' in df_demanda.columns and 'DEMANDA' in df_demanda.columns:
+            # Buscar NP y STOCK SUGERIDO (y renombrarlo a DEMANDA)
+            if 'NP' in df_demanda.columns and 'STOCK SUGERIDO' in df_demanda.columns:
                 df_demanda['NP'] = df_demanda['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                return df_demanda[['NP', 'DEMANDA']].drop_duplicates(subset=['NP'])
+                df_demanda = df_demanda[['NP', 'STOCK SUGERIDO']].rename(columns={'STOCK SUGERIDO': 'DEMANDA'})
+                return df_demanda.drop_duplicates(subset=['NP'])
     except Exception as e:
         print(f"Error cargando archivo DEMANDA_CUAUTITLAN: {e}")
     return pd.DataFrame(columns=['NP', 'DEMANDA'])
@@ -240,6 +243,11 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
     base = pd.merge(df_sol, ventas_agrupadas, on=['VENDEDOR', 'NP', 'FECHA_SOLICITUD'], how='left')
     base['CANT_FACTURADA'] = base['CANT_FACTURADA'].fillna(0)
     base['CANT_SOLICITADA'] = pd.to_numeric(base['CANT_SOLICITADA'], errors='coerce').fillna(0)
+    
+    # --- REGLA ESTRICTA 1: TOPE DE FACTURACIÓN ---
+    # Si facturó 50 pero solo pidió 10, lo topamos a 10 para no desviar el cálculo
+    base['CANT_FACTURADA'] = np.minimum(base['CANT_FACTURADA'], base['CANT_SOLICITADA'])
+    
     base['PIEZAS_NO_FACTURADAS'] = (base['CANT_SOLICITADA'] - base['CANT_FACTURADA']).clip(lower=0)
     
     # CRUCE 2: VALIDACIÓN CON ALMACÉN FÍSICO
@@ -252,12 +260,16 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
         
     base['EXISTENCIA'] = base['EXISTENCIA'].fillna(0)
     base['COSTO_UNITARIO'] = base['COSTO_UNITARIO'].fillna(0)
-    base['CAPITAL_INMOVILIZADO'] = base['PIEZAS_NO_FACTURADAS'] * base['COSTO_UNITARIO']
+    
+    # --- REGLA ESTRICTA 2: VALORACIÓN JUSTA DEL CAPITAL ---
+    # Solo multiplicar por el costo lo que NO se facturó, o la existencia (lo que sea menor)
+    piezas_a_valorar = np.minimum(base['PIEZAS_NO_FACTURADAS'], base['EXISTENCIA'])
+    base['CAPITAL_INMOVILIZADO'] = piezas_a_valorar * base['COSTO_UNITARIO']
     
     riesgo = (base['PIEZAS_NO_FACTURADAS'] > 0) & (base['EXISTENCIA'] > 0)
     base['ALERTA'] = np.where(riesgo, "🚨 ESTANCADO (EN ALM. GENERAL)", "✅ CUMPLIDO")
     
-    # CRUCE 3: CLASIFICACIÓN DE DEMANDA
+    # CRUCE 3: CLASIFICACIÓN DE DEMANDA (STOCK SUGERIDO)
     if not df_dem.empty:
         base = pd.merge(base, df_dem, on='NP', how='left')
     else:
@@ -293,7 +305,9 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             
         df_ventas = descargar_ventas_optimizadas(drive_service, MASTER_SALES_ID)
         df_almacen = cargar_inventario_filtrado(drive_service, INVENTORY_FOLDER_ID)
-        df_demanda = cargar_demanda_cuautitlan(drive_service, INVENTORY_FOLDER_ID)
+        
+        # Extracción de la Demanda llamando a la nueva función
+        df_demanda = cargar_demanda_cuautitlan(drive_service)
         
         base_final = procesar_cruce_maestro(df_drive, df_ventas, df_almacen, df_demanda)
         
@@ -303,24 +317,49 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             
         st.markdown("---")
         
+        # --- KPIs GLOBALES SUPERIORES ---
         total_pedido = base_final['CANT_SOLICITADA'].sum()
         total_facturado = base_final['CANT_FACTURADA'].sum()
-        capital_atorado = base_final[base_final['ALERTA'].str.contains("ESTANCADO")]['CAPITAL_INMOVILIZADO'].sum()
+        # Solo sumamos el capital inmovilizado calculado con la Regla Estricta 2
+        capital_atorado = base_final['CAPITAL_INMOVILIZADO'].sum()
         
         col1, col2, col3 = st.columns(3)
         col1.metric("📦 Total Piezas Solicitadas (Aptas > 5 Días)", f"{total_pedido:,.0f}")
         col2.metric("🧾 Total Piezas Facturadas", f"{total_facturado:,.0f}")
         col3.metric("💸 Capital Estancado (Riesgo Rojo)", f"${capital_atorado:,.2f}")
         
-        # --- TABLA PRINCIPAL (SIN DECIMALES EN CANTIDADES) ---
-        st.subheader("📋 Detalle de Solicitudes y Estatus")
         columnas_vista = [
-            'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'FECHA_SOLICITUD', 
+            'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'DEMANDA', 'FECHA_SOLICITUD', 
             'CANT_SOLICITADA', 'CANT_FACTURADA', 'PIEZAS_NO_FACTURADAS', 
-            'EXISTENCIA', 'CAPITAL_INMOVILIZADO', 'ALERTA', 'DEMANDA'
+            'EXISTENCIA', 'CAPITAL_INMOVILIZADO', 'ALERTA'
         ]
         cols_finales = [c for c in columnas_vista if c in base_final.columns]
         
+        # --- TABLA 1: SOLO ESTANCADOS (Pidieron, hay stock, no facturado) ---
+        st.subheader("🚨 Detalle de Solicitudes Pendientes (Riesgo Almacén)")
+        
+        mask_pendientes = (base_final['PIEZAS_NO_FACTURADAS'] > 0) & (base_final['EXISTENCIA'] > 0)
+        df_pendientes = base_final[mask_pendientes].copy()
+        
+        if not df_pendientes.empty:
+            st.dataframe(
+                df_pendientes[cols_finales].style.format({
+                    'CANT_SOLICITADA': '{:,.0f}',
+                    'CANT_FACTURADA': '{:,.0f}',
+                    'PIEZAS_NO_FACTURADAS': '{:,.0f}',
+                    'EXISTENCIA': '{:,.0f}',
+                    'CAPITAL_INMOVILIZADO': '${:,.2f}'
+                }), 
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.success("¡Excelente! No hay piezas estancadas por solicitudes no facturadas.")
+            
+        st.markdown("---")
+        
+        # --- TABLA 2: HISTÓRICO COMPLETO (Todo lo del Drive) ---
+        st.subheader("📋 Historial Completo de Solicitudes")
         st.dataframe(
             base_final[cols_finales].style.format({
                 'CANT_SOLICITADA': '{:,.0f}',
