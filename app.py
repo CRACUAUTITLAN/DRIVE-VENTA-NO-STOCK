@@ -5,6 +5,7 @@ import io
 import datetime
 import gc
 import requests
+import plotly.express as px
 from dateutil.relativedelta import relativedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -138,6 +139,10 @@ def cargar_inventario_filtrado(_drive_service, inventory_folder_id):
             if 'COSTO_UNITARIO' in df_inv.columns:
                 df_inv['COSTO_UNITARIO'] = pd.to_numeric(df_inv['COSTO_UNITARIO'], errors='coerce').fillna(0)
             
+            # Blindaje por si la columna de fecha de compra no existe en la base
+            if 'FEC_ULT_COMPRA' not in df_inv.columns:
+                df_inv['FEC_ULT_COMPRA'] = pd.NaT
+            
             mask_filtro = (df_inv['SUCURSAL'].astype(str).str.strip().str.upper() == 'CUAUTITLAN') & \
                           (df_inv['ALMACEN'].astype(str).str.strip().str.upper() == 'ALM. GENERAL')
             return df_inv[mask_filtro].copy()
@@ -172,9 +177,8 @@ def cargar_demanda_cuautitlan(_drive_service):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def descargar_ventas_optimizadas(_drive_service, master_sales_id):
-    # CORRECCIÓN DE FECHAS: Atrapar ventas hasta el día de HOY
     hoy = datetime.datetime.now()
-    fecha_fin = hoy + relativedelta(days=1)  # Asegura tomar facturas del día actual
+    fecha_fin = hoy + relativedelta(days=1)
     fecha_inicio = hoy - relativedelta(years=1)
     anios_drive = list(set([fecha_inicio.year, fecha_fin.year]))
     
@@ -207,7 +211,6 @@ def descargar_ventas_optimizadas(_drive_service, master_sales_id):
     gc.collect()
     
     df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
-    # Aplicar la nueva máscara de fecha que sí contempla el mes en curso
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] <= fecha_fin)
     df_global = df_global[mask].copy()
     
@@ -224,11 +227,11 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
     df_ven = df_ven.rename(columns={'FECHA': 'FECHA_VENTA', 'CANTIDAD': 'CANT_VENDIDA'})
     
     df_sol['NP'] = df_sol['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-    df_sol['FECHA_SOLICITUD'] = pd.to_datetime(df_sol['FECHA_SOLICITUD'], dayfirst=True, errors='coerce')
+    df_sol['FECHA_SOLICITUD_DT'] = pd.to_datetime(df_sol['FECHA_SOLICITUD'], dayfirst=True, errors='coerce')
     
     # REGLA DE 5 DÍAS DE ANTIGÜEDAD
     fecha_limite = pd.Timestamp.now().normalize() - pd.Timedelta(days=5)
-    df_sol = df_sol[df_sol['FECHA_SOLICITUD'] <= fecha_limite].copy()
+    df_sol = df_sol[df_sol['FECHA_SOLICITUD_DT'] <= fecha_limite].copy()
     
     if df_sol.empty:
         return df_sol 
@@ -237,25 +240,30 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
     cruce_ventas = pd.merge(df_sol, df_ven[['VENDEDOR', 'NP', 'FECHA_VENTA', 'CANT_VENDIDA']], 
                             on=['VENDEDOR', 'NP'], how='left')
     
-    ventas_validas = cruce_ventas[cruce_ventas['FECHA_VENTA'] >= cruce_ventas['FECHA_SOLICITUD']]
-    ventas_agrupadas = ventas_validas.groupby(['VENDEDOR', 'NP', 'FECHA_SOLICITUD'])['CANT_VENDIDA'].sum().reset_index()
-    ventas_agrupadas = ventas_agrupadas.rename(columns={'CANT_VENDIDA': 'CANT_FACTURADA'})
+    ventas_validas = cruce_ventas[cruce_ventas['FECHA_VENTA'] >= cruce_ventas['FECHA_SOLICITUD_DT']]
+    ventas_agrupadas = ventas_validas.groupby(['VENDEDOR', 'NP', 'FECHA_SOLICITUD_DT'])['CANT_VENDIDA'].sum().reset_index()
+    ventas_agrupadas = ventas_agrupadas.rename(columns={'CANT_VENDIDA': 'CANT_FACTURADA', 'FECHA_SOLICITUD_DT': 'FECHA_SOLICITUD'})
     
     base = pd.merge(df_sol, ventas_agrupadas, on=['VENDEDOR', 'NP', 'FECHA_SOLICITUD'], how='left')
     base['CANT_FACTURADA'] = base['CANT_FACTURADA'].fillna(0)
     base['CANT_SOLICITADA'] = pd.to_numeric(base['CANT_SOLICITADA'], errors='coerce').fillna(0)
     
-    # TOPE DE FACTURACIÓN (Si facturó 10 y pidió 5, la cuenta topa en 5)
+    # TOPE DE FACTURACIÓN
     base['CANT_FACTURADA'] = np.minimum(base['CANT_FACTURADA'], base['CANT_SOLICITADA'])
     base['PIEZAS_NO_FACTURADAS'] = (base['CANT_SOLICITADA'] - base['CANT_FACTURADA']).clip(lower=0)
     
-    # CRUCE 2: VALIDACIÓN CON ALMACÉN FÍSICO
+    # CRUCE 2: VALIDACIÓN CON ALMACÉN FÍSICO Y EXTRACCIÓN DE FECHA COMPRA
     if not df_alm.empty:
-        alm_agrupado = df_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum'), COSTO_UNITARIO=('COSTO_UNITARIO', 'max')).reset_index()
+        alm_agrupado = df_alm.groupby('NP').agg(
+            EXISTENCIA=('EXISTENCIA', 'sum'), 
+            COSTO_UNITARIO=('COSTO_UNITARIO', 'max'),
+            FEC_ULT_COMPRA=('FEC_ULT_COMPRA', 'max') # Extrayendo la fecha de ingreso
+        ).reset_index()
         base = pd.merge(base, alm_agrupado, on='NP', how='left')
     else:
         base['EXISTENCIA'] = 0
         base['COSTO_UNITARIO'] = 0
+        base['FEC_ULT_COMPRA'] = pd.NaT
         
     base['EXISTENCIA'] = base['EXISTENCIA'].fillna(0)
     base['COSTO_UNITARIO'] = base['COSTO_UNITARIO'].fillna(0)
@@ -264,17 +272,20 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
     piezas_a_valorar = np.minimum(base['PIEZAS_NO_FACTURADAS'], base['EXISTENCIA'])
     base['CAPITAL_INMOVILIZADO'] = piezas_a_valorar * base['COSTO_UNITARIO']
     
-    # NUEVA REGLA ESTRICTA DE EXISTENCIAS (Solo alerta si la existencia es MAYOR O IGUAL a lo que solicitó)
     riesgo = (base['PIEZAS_NO_FACTURADAS'] > 0) & (base['EXISTENCIA'] >= base['CANT_SOLICITADA'])
     base['ALERTA'] = np.where(riesgo, "🚨 ESTANCADO (EN ALM. GENERAL)", "✅ CUMPLIDO")
     
-    # CRUCE 3: CLASIFICACIÓN DE DEMANDA
+    # CRUCE 3: CLASIFICACIÓN DE DEMANDA (Reemplazando Sin Clasificación por OBSOLETO)
     if not df_dem.empty:
         base = pd.merge(base, df_dem, on='NP', how='left')
     else:
-        base['DEMANDA'] = "SIN CLASIFICACION"
+        base['DEMANDA'] = "OBSOLETO"
         
-    base['DEMANDA'] = base['DEMANDA'].fillna("SIN CLASIFICACION")
+    base['DEMANDA'] = base['DEMANDA'].fillna("OBSOLETO").replace("SIN CLASIFICACION", "OBSOLETO")
+    
+    # --- FORMATEO DE FECHAS (Sin horas, solo DD/MM/AAAA) ---
+    base['INGRESO DE COMPRA'] = pd.to_datetime(base['FEC_ULT_COMPRA'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("Sin Registro")
+    base['FECHA_SOLICITUD'] = base['FECHA_SOLICITUD_DT'].dt.strftime('%d/%m/%Y').fillna("Sin Fecha")
     
     return base
 
@@ -314,28 +325,28 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             
         st.markdown("---")
         
-        # --- KPIs GLOBALES SUPERIORES ---
-        total_pedido = base_final['CANT_SOLICITADA'].sum()
-        total_facturado = base_final['CANT_FACTURADA'].sum()
-        capital_atorado = base_final['CAPITAL_INMOVILIZADO'].sum()
+        # --- TABLA 1 (FILTRO DE RIESGO: PREPARADA ANTES DE LAS MÉTRICAS) ---
+        mask_pendientes = (base_final['PIEZAS_NO_FACTURADAS'] > 0) & (base_final['EXISTENCIA'] >= base_final['CANT_SOLICITADA'])
+        df_pendientes = base_final[mask_pendientes].copy()
         
-        col1, col2, col3 = st.columns(3)
-        col1.metric("📦 Total Piezas Solicitadas (Aptas > 5 Días)", f"{total_pedido:,.0f}")
-        col2.metric("🧾 Total Piezas Facturadas", f"{total_facturado:,.0f}")
-        col3.metric("💸 Capital Estancado (Riesgo Rojo)", f"${capital_atorado:,.2f}")
+        # --- NUEVAS MÉTRICAS GLOBALES SUPERIORES ---
+        total_pdte_facturar = base_final['PIEZAS_NO_FACTURADAS'].sum()
+        capital_atorado = df_pendientes['CAPITAL_INMOVILIZADO'].sum() # Extrae estrictamente la sumatoria de la Tabla 1
         
+        col1, col2 = st.columns(2)
+        col1.metric("📦 Total Piezas Pendiente Facturar", f"{total_pdte_facturar:,.0f}")
+        col2.metric("💸 Capital Estancado (Riesgo Rojo)", f"${capital_atorado:,.2f}")
+        
+        # Agregamos INGRESO DE COMPRA justo después de FECHA_SOLICITUD
         columnas_vista = [
-            'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'DEMANDA', 'FECHA_SOLICITUD', 
+            'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'DEMANDA', 'FECHA_SOLICITUD', 'INGRESO DE COMPRA',
             'CANT_SOLICITADA', 'CANT_FACTURADA', 'PIEZAS_NO_FACTURADAS', 
             'EXISTENCIA', 'CAPITAL_INMOVILIZADO', 'ALERTA'
         ]
         cols_finales = [c for c in columnas_vista if c in base_final.columns]
         
-        # --- TABLA 1: SOLO ESTANCADOS (La nueva regla ahora filtra esto perfectamente) ---
+        # --- MOSTRAR TABLA 1: SOLO ESTANCADOS ---
         st.subheader("🚨 Detalle de Solicitudes Pendientes (Riesgo Almacén)")
-        mask_pendientes = (base_final['PIEZAS_NO_FACTURADAS'] > 0) & (base_final['EXISTENCIA'] >= base_final['CANT_SOLICITADA'])
-        df_pendientes = base_final[mask_pendientes].copy()
-        
         if not df_pendientes.empty:
             st.dataframe(
                 df_pendientes[cols_finales].style.format({
@@ -353,7 +364,7 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             
         st.markdown("---")
         
-        # --- TABLA 2: HISTÓRICO COMPLETO ---
+        # --- MOSTRAR TABLA 2: HISTÓRICO COMPLETO ---
         st.subheader("📋 Historial Completo de Solicitudes")
         st.dataframe(
             base_final[cols_finales].style.format({
@@ -374,7 +385,12 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         
         with colA:
             st.subheader("🎯 Desempeño de Venta por Asesor")
-            desempeno = base_final.groupby('VENDEDOR').agg(
+            
+            # FILTRO ESTRICTO DE DESEMPEÑO: Solo se evalúa si ya facturó ALGO o si realmente HAY stock para surtir
+            mask_evaluable = (base_final['CANT_FACTURADA'] > 0) | (base_final['EXISTENCIA'] >= base_final['CANT_SOLICITADA'])
+            df_evaluable = base_final[mask_evaluable]
+            
+            desempeno = df_evaluable.groupby('VENDEDOR').agg(
                 PIEZAS_SOLICITADAS=('CANT_SOLICITADA', 'sum'),
                 PIEZAS_FACTURADAS=('CANT_FACTURADA', 'sum')
             ).reset_index()
@@ -401,10 +417,29 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
             calidad = base_final.groupby('DEMANDA').agg(
                 TOTAL_PIEZAS_SOLICITADAS=('CANT_SOLICITADA', 'sum')
             ).reset_index()
-            
             calidad = calidad.sort_values(by='TOTAL_PIEZAS_SOLICITADAS', ascending=False)
             
-            st.bar_chart(calidad.set_index('DEMANDA'), color="#ff4b4b")
+            # Asignación estricta de semáforo de colores para la demanda usando Plotly
+            mapa_colores = {
+                "ALTA": "#11734b",       # Verde fuerte
+                "MEDIA": "#ffb703",      # Naranja/Amarillo
+                "BAJA": "#fb8500",       # Naranja oscuro
+                "OBSOLETO": "#b10202"    # Rojo Peligro
+            }
+            
+            fig = px.bar(
+                calidad, 
+                x="DEMANDA", 
+                y="TOTAL_PIEZAS_SOLICITADAS", 
+                color="DEMANDA",
+                color_discrete_map=mapa_colores,
+                text="TOTAL_PIEZAS_SOLICITADAS"
+            )
+            fig.update_traces(textposition="outside", textfont=dict(size=14, color="white"))
+            fig.update_layout(showlegend=False, xaxis_title="", yaxis_title="Piezas Solicitadas", margin=dict(t=20, b=0))
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
             st.dataframe(
                 calidad.style.format({'TOTAL_PIEZAS_SOLICITADAS': '{:,.0f}'}), 
                 use_container_width=True, 
