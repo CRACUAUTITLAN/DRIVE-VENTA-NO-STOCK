@@ -147,7 +147,6 @@ def cargar_inventario_filtrado(_drive_service, inventory_folder_id):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_demanda_cuautitlan(_drive_service):
-    # ID de la carpeta exacta de la demanda
     folder_id = "1rjtSHBSrHWeBj771lAUJwN4uGGHhdHwo"
     try:
         query = f"name contains 'DEMANDA_CUAUTITLAN' and '{folder_id}' in parents and trashed=false"
@@ -161,7 +160,6 @@ def cargar_demanda_cuautitlan(_drive_service):
             engine = 'xlrd' if 'xls' in files[0]['name'].lower() and 'xlsx' not in files[0]['name'].lower() else 'openpyxl'
             df_demanda = pd.read_excel(content, engine=engine)
             
-            # EXTRACCIÓN ESTRICTA POR POSICIÓN: Columna A (0) y Columna F (5)
             if len(df_demanda.columns) >= 6:
                 df_demanda = df_demanda.iloc[:, [0, 5]].copy()
                 df_demanda.columns = ['NP', 'DEMANDA']
@@ -174,9 +172,10 @@ def cargar_demanda_cuautitlan(_drive_service):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def descargar_ventas_optimizadas(_drive_service, master_sales_id):
+    # CORRECCIÓN DE FECHAS: Atrapar ventas hasta el día de HOY
     hoy = datetime.datetime.now()
-    fecha_fin = hoy.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    fecha_inicio = fecha_fin - relativedelta(years=1)
+    fecha_fin = hoy + relativedelta(days=1)  # Asegura tomar facturas del día actual
+    fecha_inicio = hoy - relativedelta(years=1)
     anios_drive = list(set([fecha_inicio.year, fecha_fin.year]))
     
     sucursales = ["CUAUTITLAN", "TULTITLAN", "BAJIO"]
@@ -208,7 +207,8 @@ def descargar_ventas_optimizadas(_drive_service, master_sales_id):
     gc.collect()
     
     df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
-    mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
+    # Aplicar la nueva máscara de fecha que sí contempla el mes en curso
+    mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] <= fecha_fin)
     df_global = df_global[mask].copy()
     
     df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
@@ -245,7 +245,7 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
     base['CANT_FACTURADA'] = base['CANT_FACTURADA'].fillna(0)
     base['CANT_SOLICITADA'] = pd.to_numeric(base['CANT_SOLICITADA'], errors='coerce').fillna(0)
     
-    # TOPE DE FACTURACIÓN
+    # TOPE DE FACTURACIÓN (Si facturó 10 y pidió 5, la cuenta topa en 5)
     base['CANT_FACTURADA'] = np.minimum(base['CANT_FACTURADA'], base['CANT_SOLICITADA'])
     base['PIEZAS_NO_FACTURADAS'] = (base['CANT_SOLICITADA'] - base['CANT_FACTURADA']).clip(lower=0)
     
@@ -264,7 +264,8 @@ def procesar_cruce_maestro(df_sol, df_ven, df_alm, df_dem):
     piezas_a_valorar = np.minimum(base['PIEZAS_NO_FACTURADAS'], base['EXISTENCIA'])
     base['CAPITAL_INMOVILIZADO'] = piezas_a_valorar * base['COSTO_UNITARIO']
     
-    riesgo = (base['PIEZAS_NO_FACTURADAS'] > 0) & (base['EXISTENCIA'] > 0)
+    # NUEVA REGLA ESTRICTA DE EXISTENCIAS (Solo alerta si la existencia es MAYOR O IGUAL a lo que solicitó)
+    riesgo = (base['PIEZAS_NO_FACTURADAS'] > 0) & (base['EXISTENCIA'] >= base['CANT_SOLICITADA'])
     base['ALERTA'] = np.where(riesgo, "🚨 ESTANCADO (EN ALM. GENERAL)", "✅ CUMPLIDO")
     
     # CRUCE 3: CLASIFICACIÓN DE DEMANDA
@@ -330,9 +331,9 @@ if st.button("🚀 Extraer Datos y Auditar Vendedores", type="primary"):
         ]
         cols_finales = [c for c in columnas_vista if c in base_final.columns]
         
-        # --- TABLA 1: SOLO ESTANCADOS ---
+        # --- TABLA 1: SOLO ESTANCADOS (La nueva regla ahora filtra esto perfectamente) ---
         st.subheader("🚨 Detalle de Solicitudes Pendientes (Riesgo Almacén)")
-        mask_pendientes = (base_final['PIEZAS_NO_FACTURADAS'] > 0) & (base_final['EXISTENCIA'] > 0)
+        mask_pendientes = (base_final['PIEZAS_NO_FACTURADAS'] > 0) & (base_final['EXISTENCIA'] >= base_final['CANT_SOLICITADA'])
         df_pendientes = base_final[mask_pendientes].copy()
         
         if not df_pendientes.empty:
