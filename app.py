@@ -58,29 +58,24 @@ def get_auth_headers():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cargar_base_maestra():
-    # ID del archivo extraído de tu enlace
     FILE_ID = "1ql3_qPjMK167EfWVuQK1m-Cjm3a6TPy4"
-    
-    # Endpoint oficial de Google Drive API para descargar archivos binarios (.xlsx)
     URL_DRIVE = f"https://www.googleapis.com/drive/v3/files/{FILE_ID}?alt=media"
     headers_robot = get_auth_headers()
     
     try:
         res = requests.get(URL_DRIVE, headers=headers_robot)
         if res.status_code == 200:
-            # ¡CLAVE! Como es un .xlsx, usamos io.BytesIO y pd.read_excel
             df = pd.read_excel(io.BytesIO(res.content))
             
-            # 🛡️ LIMPIADOR DE FORMATOS DE MONEDA Y NÚMEROS (Solución a los ceros)
+            # Limpiador de formatos
             numeric_cols = ['CANT_SOLICITADA', 'CANT_FACTURADA', 'CANT_FACTURADA_APOYO', 
                             'PIEZAS_NO_FACTURADAS', 'EXISTENCIA', 'CAPITAL_INMOVILIZADO']
             for col in numeric_cols:
                 if col in df.columns:
-                    # Convierte a string, quita signos de $ y comas, luego convierte a número matemático
                     df[col] = df[col].astype(str).str.replace(r'[$,]', '', regex=True)
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             
-            # 🎨 MAQUILLAJE DE EMOJIS DINÁMICO
+            # Maquillaje de Emojis
             mapa_emojis = {
                 "CUMPLIDO": "✅ CUMPLIDO",
                 "ESTANCADO": "🚨 ESTANCADO",
@@ -93,7 +88,7 @@ def cargar_base_maestra():
                 
             return df
         else:
-            st.error(f"Error de acceso al servidor de Google. Código HTTP: {res.status_code}")
+            st.error("Error de acceso al servidor de Google.")
             return pd.DataFrame()
     except Exception as e:
         st.error(f"Error crítico al leer la Base Maestra: {e}")
@@ -117,10 +112,9 @@ if filtro_vendedor != "Todos":
     base_final = base_final[base_final['VENDEDOR'] == filtro_vendedor]
 
 # ==========================================
-# 3. MÉTRICAS GLOBALES SUPERIORES (NUEVOS INDICADORES)
+# 3. MÉTRICAS GLOBALES SUPERIORES
 # ==========================================
 st.markdown("---")
-# Aplicando la regla estricta de la imagen para el capital en riesgo
 mask_riesgo = base_final['ALERTA'].isin(["🚨 ESTANCADO", "⚠️ FALTA POR FACTURAR", "🤝 APOYO DE VENTA"])
 df_riesgo = base_final[mask_riesgo].copy()
 
@@ -128,7 +122,6 @@ total_pdte = base_final['PIEZAS_NO_FACTURADAS'].sum()
 capital_riesgo = df_riesgo['CAPITAL_INMOVILIZADO'].sum()
 total_apoyo = base_final['CANT_FACTURADA_APOYO'].sum()
 
-# Nueva métrica: Efectividad
 total_solicitado = base_final['CANT_SOLICITADA'].sum()
 total_facturado = base_final['CANT_FACTURADA'].sum()
 efectividad_global = (total_facturado / total_solicitado) * 100 if total_solicitado > 0 else 0
@@ -148,7 +141,7 @@ columnas_vista = [
 cols_finales = [c for c in columnas_vista if c in base_final.columns]
 
 # ==========================================
-# 4. GRÁFICOS GERENCIALES (NUEVO)
+# 4. GRÁFICOS GERENCIALES
 # ==========================================
 row1_col1, row1_col2 = st.columns(2)
 
@@ -166,7 +159,8 @@ with row1_col1:
 with row1_col2:
     st.subheader("🔥 Top 5 Refacciones Críticas (Dinero Estancado)")
     if capital_riesgo > 0:
-        top_refacciones = df_riesgo.groupby(['NP', 'DESCRIPCIÓN'])['CAPITAL_INMOVILIZADO'].sum().reset_index()
+        # Modificado para incluir VENDEDOR y DEMANDA
+        top_refacciones = df_riesgo.groupby(['VENDEDOR', 'NP', 'DESCRIPCIÓN', 'DEMANDA'])['CAPITAL_INMOVILIZADO'].sum().reset_index()
         top_refacciones = top_refacciones.sort_values(by='CAPITAL_INMOVILIZADO', ascending=False).head(5)
         st.dataframe(
             top_refacciones.style.format({'CAPITAL_INMOVILIZADO': '${:,.2f}'}),
@@ -176,16 +170,78 @@ with row1_col2:
         st.success("Sin refacciones críticas.")
 st.markdown("---")
 
+row2_col1, row2_col2 = st.columns(2)
+
+with row2_col1:
+    st.subheader("🎯 Desempeño de Venta por Asesor")
+    mask_evaluable = (base_final['CANT_FACTURADA'] > 0) | (base_final['CANT_FACTURADA_APOYO'] > 0) | (base_final['EXISTENCIA'] >= base_final['CANT_SOLICITADA'])
+    df_evaluable = base_final[mask_evaluable]
+    
+    if not df_evaluable.empty:
+        desempeno = df_evaluable.groupby('VENDEDOR').agg(
+            PIEZAS_SOLICITADAS=('CANT_SOLICITADA', 'sum'),
+            PIEZAS_FACT_PROPIAS=('CANT_FACTURADA', 'sum'),
+            PIEZAS_APOYO=('CANT_FACTURADA_APOYO', 'sum')
+        ).reset_index()
+        
+        desempeno['TASA DE ÉXITO (PROPIA)'] = np.where(
+            desempeno['PIEZAS_SOLICITADAS'] > 0,
+            desempeno['PIEZAS_FACT_PROPIAS'] / desempeno['PIEZAS_SOLICITADAS'],
+            0
+        )
+        desempeno = desempeno.sort_values(by='TASA DE ÉXITO (PROPIA)', ascending=False)
+        
+        st.dataframe(
+            desempeno.style.format({
+                'PIEZAS_SOLICITADAS': '{:,.0f}', 
+                'PIEZAS_FACT_PROPIAS': '{:,.0f}',
+                'PIEZAS_APOYO': '{:,.0f}',
+                'TASA DE ÉXITO (PROPIA)': '{:.1%}'
+            }), 
+            use_container_width=True, hide_index=True
+        )
+
+with row2_col2:
+    st.subheader("🍩 Distribución de Solicitudes (Por Demanda)")
+    calidad = base_final.groupby('DEMANDA').agg(
+        TOTAL_PIEZAS_SOLICITADAS=('CANT_SOLICITADA', 'sum')
+    ).reset_index()
+    
+    if not calidad.empty:
+        mapa_colores = {
+            "ALTA": "#11734b",       
+            "MEDIA": "#ffb703",      
+            "BAJA": "#fb8500",       
+            "OBSOLETO": "#b10202"    
+        }
+        
+        # Nuevo Gráfico de Dona para ver la distribución
+        fig_pie = px.pie(
+            calidad, 
+            names="DEMANDA", 
+            values="TOTAL_PIEZAS_SOLICITADAS", 
+            color="DEMANDA",
+            color_discrete_map=mapa_colores,
+            hole=0.4 # Esto lo convierte en dona
+        )
+        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+        fig_pie.update_layout(showlegend=False, margin=dict(t=20, b=0))
+        
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+st.markdown("---")
+
 # ==========================================
 # 5. TABLAS DE AUDITORÍA
 # ==========================================
 st.subheader("🚨 Detalle de Focos de Atención (Riesgos y Apoyos)")
-mask_alertas = base_final['ALERTA'].isin(["🚨 ESTANCADO", "⚠️ FALTA POR FACTURAR", "🤝 APOYO DE VENTA", "❌ SIN STOCK"])
-df_alertas = base_final[mask_alertas].sort_values(by='CAPITAL_INMOVILIZADO', ascending=False)
+# Filtro actualizado: Solo mostrar Estancado, Falta por facturar y Apoyo (se excluye SIN STOCK)
+mask_alertas_focos = base_final['ALERTA'].isin(["🚨 ESTANCADO", "⚠️ FALTA POR FACTURAR", "🤝 APOYO DE VENTA"])
+df_alertas_focos = base_final[mask_alertas_focos].sort_values(by='CAPITAL_INMOVILIZADO', ascending=False)
 
-if not df_alertas.empty:
+if not df_alertas_focos.empty:
     st.dataframe(
-        df_alertas[cols_finales].style.format({
+        df_alertas_focos[cols_finales].style.format({
             'CANT_SOLICITADA': '{:,.0f}', 'CANT_FACTURADA': '{:,.0f}',
             'CANT_FACTURADA_APOYO': '{:,.0f}', 'PIEZAS_NO_FACTURADAS': '{:,.0f}',
             'EXISTENCIA': '{:,.0f}', 'CAPITAL_INMOVILIZADO': '${:,.2f}'
@@ -193,7 +249,7 @@ if not df_alertas.empty:
         use_container_width=True, hide_index=True
     )
 else:
-    st.success("¡Excelente! No hay alertas pendientes. Todo está Cumplido.")
+    st.success("¡Excelente! No hay alertas estancadas o con falta de facturación.")
 
 st.markdown("---")
 with st.expander("Ver Base Maestra Completa (Histórico)"):
