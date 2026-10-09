@@ -58,13 +58,18 @@ def get_auth_headers():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cargar_base_maestra():
-    URL_DRIVE = "https://docs.google.com/spreadsheets/d/1ql3_qPjMK167EfWVuQK1m-Cjm3a6TPy4/export?format=csv&gid=1282153862"
+    # ID del archivo extraído de tu enlace
+    FILE_ID = "1ql3_qPjMK167EfWVuQK1m-Cjm3a6TPy4"
+    
+    # Endpoint oficial de Google Drive API para descargar archivos binarios (.xlsx)
+    URL_DRIVE = f"https://www.googleapis.com/drive/v3/files/{FILE_ID}?alt=media"
     headers_robot = get_auth_headers()
     
     try:
         res = requests.get(URL_DRIVE, headers=headers_robot)
         if res.status_code == 200:
-            df = pd.read_csv(io.StringIO(res.text))
+            # ¡CLAVE! Como es un .xlsx, usamos io.BytesIO y pd.read_excel
+            df = pd.read_excel(io.BytesIO(res.content))
             
             # 🛡️ LIMPIADOR DE FORMATOS DE MONEDA Y NÚMEROS (Solución a los ceros)
             numeric_cols = ['CANT_SOLICITADA', 'CANT_FACTURADA', 'CANT_FACTURADA_APOYO', 
@@ -88,7 +93,7 @@ def cargar_base_maestra():
                 
             return df
         else:
-            st.error("Error de acceso al servidor de Google.")
+            st.error(f"Error de acceso al servidor de Google. Código HTTP: {res.status_code}")
             return pd.DataFrame()
     except Exception as e:
         st.error(f"Error crítico al leer la Base Maestra: {e}")
