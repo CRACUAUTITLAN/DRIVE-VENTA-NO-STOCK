@@ -105,6 +105,20 @@ if base_final.empty:
     st.stop()
 
 st.sidebar.header("Filtros Globales")
+
+# --- NUEVO FILTRO: AGENCIA ---
+# Verificamos si la columna 'AGENCIA' existe, si no, lo asume como 'CUAUTITLAN' por defecto para evitar errores
+if 'AGENCIA' not in base_final.columns:
+    base_final['AGENCIA'] = 'CUAUTITLAN'
+
+lista_agencias = ["Todas las Agencias"] + sorted(base_final['AGENCIA'].dropna().unique().tolist())
+filtro_agencia = st.sidebar.radio("Agencia:", lista_agencias)
+
+# Aplicar el filtro de Agencia si no es "Todas las Agencias"
+if filtro_agencia != "Todas las Agencias":
+    base_final = base_final[base_final['AGENCIA'] == filtro_agencia]
+
+# --- FILTRO DE VENDEDOR ---
 lista_vendedores = ["Todos"] + sorted(base_final['VENDEDOR'].dropna().unique().tolist())
 filtro_vendedor = st.sidebar.selectbox("Vendedor:", lista_vendedores)
 
@@ -134,8 +148,8 @@ col4.metric("📈 Efectividad Sucursal", f"{efectividad_global:.1f}%")
 st.markdown("---")
 
 columnas_vista = [
-    'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'TIPO DE PEDIDO', 'DEMANDA', 'FECHA_SOLICITUD', 
-    'INGRESO DE COMPRA', 'FECHA_VENTA', 'CANT_SOLICITADA', 'CANT_FACTURADA', 
+    'AGENCIA', 'VENDEDOR', 'NP', 'DESCRIPCIÓN', 'TIPO DE PEDIDO', 'DEMANDA', 'FECHA_SOLICITUD', 
+    'INGRESO DE COMPRA', 'FECHA_VENTA', 'DIAS SIN FACTURAR', 'CANT_SOLICITADA', 'CANT_FACTURADA', 
     'CANT_FACTURADA_APOYO', 'PIEZAS_NO_FACTURADAS', 'EXISTENCIA', 'CAPITAL_INMOVILIZADO', 'ALERTA'
 ]
 cols_finales = [c for c in columnas_vista if c in base_final.columns]
@@ -215,14 +229,14 @@ with row2_col2:
             "OBSOLETO": "#b10202"    
         }
         
-        # Nuevo Gráfico de Dona para ver la distribución
+        # Gráfico de Dona
         fig_pie = px.pie(
             calidad, 
             names="DEMANDA", 
             values="TOTAL_PIEZAS_SOLICITADAS", 
             color="DEMANDA",
             color_discrete_map=mapa_colores,
-            hole=0.4 # Esto lo convierte en dona
+            hole=0.4 
         )
         fig_pie.update_traces(textposition='inside', textinfo='percent+label')
         fig_pie.update_layout(showlegend=False, margin=dict(t=20, b=0))
@@ -242,6 +256,7 @@ df_alertas_focos = base_final[mask_alertas_focos].sort_values(by='CAPITAL_INMOVI
 if not df_alertas_focos.empty:
     st.dataframe(
         df_alertas_focos[cols_finales].style.format({
+            'DIAS SIN FACTURAR': '{:,.0f}',
             'CANT_SOLICITADA': '{:,.0f}', 'CANT_FACTURADA': '{:,.0f}',
             'CANT_FACTURADA_APOYO': '{:,.0f}', 'PIEZAS_NO_FACTURADAS': '{:,.0f}',
             'EXISTENCIA': '{:,.0f}', 'CAPITAL_INMOVILIZADO': '${:,.2f}'
@@ -255,6 +270,7 @@ st.markdown("---")
 with st.expander("Ver Base Maestra Completa (Histórico)"):
     st.dataframe(
         base_final[cols_finales].style.format({
+            'DIAS SIN FACTURAR': '{:,.0f}',
             'CANT_SOLICITADA': '{:,.0f}', 'CANT_FACTURADA': '{:,.0f}',
             'CANT_FACTURADA_APOYO': '{:,.0f}', 'PIEZAS_NO_FACTURADAS': '{:,.0f}',
             'EXISTENCIA': '{:,.0f}', 'CAPITAL_INMOVILIZADO': '${:,.2f}'
